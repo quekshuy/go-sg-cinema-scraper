@@ -17,10 +17,44 @@ const (
     URL_CINEMAS = "/cinemas.jsp"
 )
 
+// getOrchestrateChanFromContext is a helper function. Since we pass the signalling
+// channel via []interface{}, we need to do type assertions to retrieve the original
+// channel.
+func getOrchestrateChanFromContext(context interface{}) chan int {
+    if c, ok := context.([]interface{}); ok {
+        channel := c[1]
+        if s, ok:=channel.(chan int); ok {
+            return s
+        }
+    }
+    return nil
+}
 
-func startGVScrape(startUrl string, nextFunc data.ScraperStrategy, cinemas chan<- []*data.Cinema, movies chan<- []*data.Movie, signal chan interface{}) {
+// syncCinemaFound sends a +1 into the channel. The channel then behaves like a 
+// counting semaphore.
+func syncCinemaFound(sync chan int) {
+    if sync != nil {
+        sync <- 1
+    }
+}
 
-    log.Println("Started gv with " + startUrl)
+// syncCinemaDone sends a -1 into the channel. The channel then behaves like a 
+// counting semaphore.
+func syncCinemaDone(sync chan int) {
+    if sync != nil {
+        sync <- -1
+    }
+}
+
+
+// startGVScrape will begin scraping the GV website for cinemas.
+// For each cinema, it runs a goroutine to fetch the movie showtimes. The goroutine
+// is run using nextFunc, a ScraperStrategy. Cinemas and Movie objects are returned via
+// the channels. The gvCount channel is for synchronization. Whenever we encounter a 
+// cinema link that we can proceed to scrape, we send an integer 1 into the channel.
+// This is to mark the number of goroutines that are currently running.
+func startGVScrape(startUrl string, nextFunc data.ScraperStrategy, cinemas chan<- []*data.Cinema, movies chan<- []*data.Movie, gvCount chan int) {
+
     var doc *gq.Document
     var err error
 
@@ -36,38 +70,30 @@ func startGVScrape(startUrl string, nextFunc data.ScraperStrategy, cinemas chan<
             } else {
                 /*log.Println("Going to scrape: " + BASE + "/" + url + ", with name = " + text)*/
                 if text != "" {
-                    go nextFunc(BASE + "/" + url, []interface{}{text, signal}, cinemas, movies)
+                    go nextFunc(BASE + "/" + url, []interface{}{text, gvCount}, cinemas, movies)
+                    syncCinemaFound(gvCount)
                 }
             }
         }
     })
 }
 
+// scrapeCinemaMovies parses the layout for a GV cinema's page. Basically it reads a table,
+// that GV will display on their page, and parses it for the relevant information. 
+// It doesn't have all the information, but that's OK for this really early version.
+// context is where calling functions can pass additional info or even function pointers in.
+// I haven't worked out how to make it really modular yet, maybe in future we'll include a 
+// function that we will call, that's actually a closure, so state can be maintained.
 func scrapeCinemaMovies(url string, context interface{}, cinemas chan<- []*data.Cinema, movies chan<- []*data.Movie) {
 
     var doc *gq.Document
     var err error
     var cinemaName interface{}
-    /*var signal chan interface{}*/
+    var signalChan chan int
 
     if ctxList, ok := context.([]interface{}); ok {
         cinemaName = ctxList[0]
-        /*if s, ok := ctxList[1].(chan interface{}); ok {*/
-            /*[>signal = s<]*/
-        /*}*/
-        /*switch s := ctxList[1].(type) {*/
-        /*case chan interface{}:*/
-            /*signal = s*/
-        /*case nil:*/
-            /*log.Println("Nope not a chan")*/
-        /*default:*/
-            /*log.Println("default case")*/
-        /*}*/
-
-        /*if s, ok := ctxList[1].(chan interface{}); ok {*/
-            /*log.Println("assigned signal")*/
-            /*signal = s*/
-        /*}*/
+        signalChan = getOrchestrateChanFromContext(context)
     }
 
     log.Println("Retrieving document for " + url)
@@ -108,7 +134,7 @@ func scrapeCinemaMovies(url string, context interface{}, cinemas chan<- []*data.
                 ShowTimes: showtimes,
                 // no description and duration here
             }
-            log.Printf("Found movie: %v\n", *movie)
+            /*log.Printf("Found movie: %v\n", *movie)*/
 
             cinemaMovies = append(cinemaMovies, movie)
 
@@ -119,21 +145,20 @@ func scrapeCinemaMovies(url string, context interface{}, cinemas chan<- []*data.
             Name: name,
             Movies: cinemaMovies,
         }
-        log.Printf("Found cinema: %v\n", *cinema)
+
         cinemas <- []*data.Cinema{ cinema }
     }
 
-    // Send the movie details
+    // Send the movie details for this cinema
     movies <- cinemaMovies
-    // Signal that we are done
-    /*if signal != nil {*/
-        /*signal <- true*/
-    /*}*/
 
+    // Signal that we are done with one cinema
+    signalChan<- -1
 }
 
 
-// Only scrapes for today
+// prepScrapeCinemaMovies prepares the actual URL for movie showtimes at a particular cinema, then
+// calls the actual scraping function.
 func prepScrapeCinemaMovies(url string, context interface{}, cinemas chan<- []*data.Cinema, movies chan<- []*data.Movie) {
 
     var doc *gq.Document
@@ -145,46 +170,53 @@ func prepScrapeCinemaMovies(url string, context interface{}, cinemas chan<- []*d
     }
 
     allText, err := doc.Html()
-    // find the buyTickets2.jsp
-    // and print it out
     startIdx := strings.Index(allText, "buyTickets2")
+
     if startIdx >-1 {
-        /*log.Println("Found buyTickets2: " + allText[startIdx:])*/
+
         locIdx := strings.Index(allText[startIdx:], "loc=")
-        /*log.Println("Found loc : "+allText[startIdx+locIdx:])*/
         endLoc := strings.Index(allText[startIdx+locIdx:], "&")
         loc := allText[startIdx+locIdx+4 : startIdx+locIdx+endLoc]
-        log.Println("Location: " + loc)
-        /*locIdx := strings.Index(allText[startIdx:], "loc=")*/
-        /*locEnd := strings.Index(allText[startIdx+locIdx:], "&")*/
-        /*loc := allText[locIdx+4:locEnd]*/
-        /*log.Println("Buytickets loc = " + loc)*/
+
+
         go scrapeCinemaMovies(BASE + "/buyTickets2.jsp?loc="+loc+"&date=" + time.Now().Format("02-01-2006"), context, cinemas, movies)
 
     } else {
         log.Fatalf("No available source URL")
     }
 
-    // we have to hunt for the ajax call
-    // which is actually BASE + /buyTickets2.jsp?loc=<some_int>&date=<dd-mm-yyyy>
-    /*firstElem := doc.Find("div#tabPanelWrapper div.tabPanel ul li a").First()*/
-    /*// empty *Selection if does not exist*/
-    /*if firstElem.Nodes != nil {*/
-        /*// Find the URL we want*/
-        /*if onClick, exists := firstElem.Attr("onclick"); exists {*/
-            /*log.Println("onclick = " + onClick)*/
-            /*startIdx := strings.Index(onClick, "buyTickets2")*/
-            /*if startIdx > -1 {*/
-                /*endIdx := strings.Index(onClick[startIdx:], "'")*/
-                /*nextUrl := onClick[startIdx:startIdx+endIdx]*/
-                /*go scrapeCinemaMovies(BASE+"/"+nextUrl, context, cinemas, movies)*/
-            /*}*/
-        /*}*/
-    /*}*/
 }
 
+// Load is a non-blocking call that will return via the channels the cinemas and movies
+// for this cinema. Notice the signal channel. A true will be sent down the channel when
+// Load detects all possible cinemas have been scraped.
 func Load(cinemas chan<- []*data.Cinema, movies chan<- []*data.Movie, signal chan interface{}) {
 
     log.Println("Loading GV")
-    go startGVScrape(BASE+URL_CINEMAS, prepScrapeCinemaMovies, cinemas, movies, signal)
+    countChan := make(chan int)
+    go startGVScrape(BASE+URL_CINEMAS, prepScrapeCinemaMovies, cinemas, movies, countChan)
+
+    cinemaCount := 0
+
+    // now we wait for all the cinemas to be returned
+    go func() {
+        for {
+            select {
+            case num :=<-countChan:
+                cinemaCount += num
+                log.Printf("\t\tcinemaCount = %d\n", cinemaCount)
+                if cinemaCount == 0 {
+                    log.Println("No more cinemas")
+                    // signal that it's the end
+                    signal<-true
+                    log.Println("Signalled that is complete")
+                    return
+                }
+            case <-time.After(time.Second*20):
+                //Timeout after 20 seconds of not hearing anything
+                log.Println("GV scraping timed out. No new cinemas received")
+                return
+            }
+        }
+    }()
 }

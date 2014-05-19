@@ -10,6 +10,7 @@ import (
 func waitForCinema(cinemaChan chan []*data.Cinema) {
     for {
         select {
+        case <-cinemaChan:
             case cinemas :=<-cinemaChan:
                 for _, c:= range cinemas {
                     log.Printf("Cinema: %v\n", *c)
@@ -24,13 +25,13 @@ func waitForCinema(cinemaChan chan []*data.Cinema) {
 func waitForMovie(moviesChan chan[]*data.Movie, signal chan interface{}) {
     for {
         select {
+        case <-moviesChan:
         case movies :=<-moviesChan:
             for _, m:=range movies{
                 log.Printf("Movie: %v\n", *m)
             }
         case <-time.After(time.Second *20):
             log.Println("Timeout movies")
-            signal <- true
             return
         }
     }
@@ -46,5 +47,7 @@ func main() {
     go waitForMovie(moviesChan, signal)
 
     gv.Load(cinemaChan, moviesChan, signal)
+    // this signals that scraping is done and we can
+    // all go home.
     <-signal
 }
