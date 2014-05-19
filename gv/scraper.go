@@ -2,7 +2,6 @@
 package gv
 
 import (
-    //"fmt"
     "time"
     "log"
     "strings"

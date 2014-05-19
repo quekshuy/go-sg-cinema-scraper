@@ -4,7 +4,8 @@ import (
     "log"
     "time"
     "github.com/quekshuy/go-sg-cinema-scraper/data"
-    "github.com/quekshuy/go-sg-cinema-scraper/gv"
+    /*"github.com/quekshuy/go-sg-cinema-scraper/gv"*/
+    "github.com/quekshuy/go-sg-cinema-scraper/cathay"
 )
 
 func waitForCinema(cinemaChan chan []*data.Cinema) {
@@ -43,11 +44,40 @@ func main() {
     moviesChan := make(chan []*data.Movie)
     signal := make(chan interface{})
 
+    /* FOR GV
     go waitForCinema(cinemaChan)
     go waitForMovie(moviesChan, signal)
 
     gv.Load(cinemaChan, moviesChan, signal)
     // this signals that scraping is done and we can
     // all go home.
+    <-signal
+    */
+
+    // For Cathay
+    go func() {
+        for movies := range moviesChan {
+            for _, m := range movies {
+                log.Printf("Movie: %v\n", m)
+            }
+        }
+        signal<-true
+    }()
+
+    go func() {
+
+        for cinemas := range cinemaChan {
+            for _, c := range cinemas {
+                log.Printf("Cinema: %v\n", c)
+            }
+        }
+        signal<-true
+
+    }()
+
+    cathay.Load(cinemaChan, moviesChan)
+
+    // 2 signals marks as finished
+    <-signal
     <-signal
 }
